@@ -24,54 +24,67 @@ CloudWatch Alarms:
 | `3 - Failover Simulation & RTO Report` | After workflow 2 / weekly Sunday 08:00 UTC | Simulates primary failure, measures RTO, generates lab report |
 | `4 - Lint & Validate` | Every push / PR | Flake8 linting, config validation, YAML syntax check |
 
-## Required GitHub Secrets
+## Authentication: OIDC Federated Identity (No Long-Lived Secrets)
 
-Set these in **Settings → Secrets and variables → Actions**:
+This project uses **OpenID Connect (OIDC)** to authenticate GitHub Actions to AWS.
+**No IAM access keys or repository secrets are required.**
 
-| Secret | Description |
+### How It Works
+
+```
+GitHub Actions Runner
+  │
+  ├─ GitHub generates a short-lived OIDC JWT (valid ~5 min)
+  │  signed by token.actions.githubusercontent.com
+  │
+  └─► aws-actions/configure-aws-credentials
+        │
+        └─► sts:AssumeRoleWithWebIdentity
+              │  validates: aud == sts.amazonaws.com
+              │  validates: sub matches repo + branch condition
+              │
+              └─► Temporary credentials (1-hour TTL, auto-expire)
+                    └─► S3, IAM, CloudWatch API calls
+```
+
+### One-Time Setup (run locally with IAM admin access)
+
+```bash
+pip install boto3
+python setup_oidc_role.py
+```
+
+This creates:
+- **IAM OIDC Identity Provider** for `token.actions.githubusercontent.com`
+- **IAM Role** `github-actions-oidc-role`
+  ARN: `arn:aws:iam::866934333672:role/github-actions-oidc-role`
+  With a least-privilege policy scoped to only the S3 buckets, CRR IAM role, CloudWatch alarms, and STS identity check needed by the workflows
+
+The script is fully idempotent — safe to run multiple times.
+
+### Trusted Branches & Events
+
+The OIDC trust policy accepts tokens only from:
+
+| Condition | Value |
 |---|---|
-| `AWS_ACCESS_KEY_ID` | IAM user access key with S3 + IAM + CloudWatch permissions |
-| `AWS_SECRET_ACCESS_KEY` | Corresponding secret key |
+| Repository | `secant78/Multi-Region-S3-Replication-Failover` |
+| Branches | `main`, `feature/*` |
+| Events | Push + Pull Request |
 
-### Minimum IAM Permissions Required
+Tokens from forks, unrelated repos, or other branches are **rejected by AWS STS**.
+
+### Verifying OIDC is Working
+
+After a successful workflow run, the "Verify AWS identity" step in Workflow 1 will show:
 
 ```json
 {
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": [
-        "s3:CreateBucket", "s3:PutBucketVersioning",
-        "s3:PutBucketReplication", "s3:GetBucketReplication",
-        "s3:PutPublicAccessBlock", "s3:ListBucket",
-        "s3:PutObject", "s3:GetObject", "s3:DeleteObject",
-        "s3:GetObjectVersion", "s3:ListObjectVersions",
-        "s3:HeadObject", "s3:HeadBucket"
-      ],
-      "Resource": "*"
-    },
-    {
-      "Effect": "Allow",
-      "Action": [
-        "iam:CreateRole", "iam:GetRole",
-        "iam:PutRolePolicy", "iam:PassRole"
-      ],
-      "Resource": "arn:aws:iam::*:role/s3-crr-role-*"
-    },
-    {
-      "Effect": "Allow",
-      "Action": ["cloudwatch:PutMetricAlarm", "cloudwatch:DescribeAlarms"],
-      "Resource": "*"
-    },
-    {
-      "Effect": "Allow",
-      "Action": ["sts:GetCallerIdentity"],
-      "Resource": "*"
-    }
-  ]
+  "Arn": "arn:aws:iam::866934333672:assumed-role/github-actions-oidc-role/GitHubActions-DeployInfrastructure"
 }
 ```
+
+The presence of `assumed-role/github-actions-oidc-role` confirms OIDC is active.
 
 ## Running Locally
 
@@ -117,7 +130,8 @@ python generate_report.py         # Step 6: Print final report
 ```
 .
 ├── config.py                  # Shared constants (bucket names, regions, thresholds)
-├── setup_infrastructure.py    # IAM role + S3 buckets + CRR + CloudWatch
+├── setup_oidc_role.py         # One-time: create OIDC provider + github-actions-oidc-role
+├── setup_infrastructure.py    # IAM CRR role + S3 buckets + CRR rules + CloudWatch
 ├── upload_and_verify.py       # Upload 20 test files, poll for replication
 ├── test_delete_marker.py      # Delete object, verify delete marker replicates
 ├── test_large_file_lag.py     # Multipart upload 500 MB, measure lag
@@ -127,8 +141,8 @@ python generate_report.py         # Step 6: Print final report
 ├── requirements.txt
 └── .github/
     └── workflows/
-        ├── 01-deploy-infrastructure.yml
-        ├── 02-replication-tests.yml
-        ├── 03-failover-simulation.yml
-        └── 04-lint-and-validate.yml
+        ├── 01-deploy-infrastructure.yml  # OIDC auth
+        ├── 02-replication-tests.yml      # OIDC auth (3 jobs)
+        ├── 03-failover-simulation.yml    # OIDC auth
+        └── 04-lint-and-validate.yml      # no AWS calls
 ```

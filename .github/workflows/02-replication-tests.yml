@@ -48,6 +48,7 @@ jobs:
     if: needs.check-upstream.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     permissions:
+      id-token: write   # required for OIDC token exchange
       contents: read
 
     steps:
@@ -60,11 +61,12 @@ jobs:
 
       - run: pip install boto3
 
-      - uses: aws-actions/configure-aws-credentials@v4
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            ${{ env.AWS_REGION }}
+          role-to-assume: arn:aws:iam::866934333672:role/github-actions-oidc-role
+          role-session-name: GitHubActions-UploadVerify
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Upload 20 files and verify replication
         run: python upload_and_verify.py
@@ -102,6 +104,7 @@ jobs:
     needs: upload-and-verify
     runs-on: ubuntu-latest
     permissions:
+      id-token: write   # required for OIDC token exchange
       contents: read
 
     steps:
@@ -114,11 +117,12 @@ jobs:
 
       - run: pip install boto3
 
-      - uses: aws-actions/configure-aws-credentials@v4
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            ${{ env.AWS_REGION }}
+          role-to-assume: arn:aws:iam::866934333672:role/github-actions-oidc-role
+          role-session-name: GitHubActions-DeleteMarker
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Test delete marker replication
         run: python test_delete_marker.py
@@ -155,6 +159,7 @@ jobs:
     if: ${{ !inputs.skip_large_file }}
     runs-on: ubuntu-latest
     permissions:
+      id-token: write   # required for OIDC token exchange
       contents: read
     timeout-minutes: 45
 
@@ -168,11 +173,12 @@ jobs:
 
       - run: pip install boto3
 
-      - uses: aws-actions/configure-aws-credentials@v4
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            ${{ env.AWS_REGION }}
+          role-to-assume: arn:aws:iam::866934333672:role/github-actions-oidc-role
+          role-session-name: GitHubActions-LargeFileTest
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Test 500 MB large file replication lag
         run: python test_large_file_lag.py
