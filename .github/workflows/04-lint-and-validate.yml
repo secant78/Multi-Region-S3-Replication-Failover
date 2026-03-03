@@ -1,0 +1,136 @@
+name: "4 - Lint & Validate"
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  lint:
+    name: Lint Python code
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install linting tools
+        run: pip install flake8 pyflakes
+
+      - name: Run flake8 (style + syntax)
+        run: |
+          flake8 . \
+            --max-line-length=120 \
+            --exclude=__pycache__,.github \
+            --count \
+            --statistics
+
+      - name: Check for syntax errors
+        run: |
+          for f in *.py; do
+            python3 -m py_compile "$f" && echo "OK: $f" || (echo "SYNTAX ERROR: $f" && exit 1)
+          done
+
+  validate-config:
+    name: Validate config.py constants
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Validate config values
+        run: |
+          python3 -c "
+          from config import (
+              ACCOUNT_ID, PRIMARY_REGION, REPLICA_REGION,
+              PRIMARY_BUCKET, REPLICA_BUCKET,
+              REPLICATION_ROLE_NAME, REPLICATION_POLICY_NAME,
+              CRITICAL_PREFIX, REPLICATE_TAG_KEY, REPLICATE_TAG_VALUE,
+              ALARM_NAME, LAG_THRESHOLD_SECONDS,
+          )
+
+          errors = []
+
+          if not ACCOUNT_ID.isdigit() or len(ACCOUNT_ID) != 12:
+              errors.append(f'ACCOUNT_ID must be 12 digits: {ACCOUNT_ID}')
+
+          if PRIMARY_REGION == REPLICA_REGION:
+              errors.append('PRIMARY_REGION and REPLICA_REGION must differ')
+
+          if not CRITICAL_PREFIX.endswith('/'):
+              errors.append(f'CRITICAL_PREFIX should end with /: {CRITICAL_PREFIX}')
+
+          if LAG_THRESHOLD_SECONDS <= 0:
+              errors.append(f'LAG_THRESHOLD_SECONDS must be positive: {LAG_THRESHOLD_SECONDS}')
+
+          if not PRIMARY_BUCKET or not REPLICA_BUCKET:
+              errors.append('Bucket names must not be empty')
+
+          if PRIMARY_BUCKET == REPLICA_BUCKET:
+              errors.append('Primary and replica bucket names must differ')
+
+          if errors:
+              for e in errors:
+                  print(f'VALIDATION ERROR: {e}')
+              exit(1)
+
+          print('All config validations passed.')
+          print(f'  Primary  : {PRIMARY_BUCKET} ({PRIMARY_REGION})')
+          print(f'  Replica  : {REPLICA_BUCKET} ({REPLICA_REGION})')
+          print(f'  SLA      : {LAG_THRESHOLD_SECONDS}s ({LAG_THRESHOLD_SECONDS//60} min)')
+          "
+
+  validate-workflows:
+    name: Validate GitHub Actions YAML syntax
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate YAML files
+        run: |
+          python3 -c "
+          import yaml, os, sys
+          workflow_dir = '.github/workflows'
+          errors = []
+          for fname in os.listdir(workflow_dir):
+              if fname.endswith('.yml') or fname.endswith('.yaml'):
+                  path = os.path.join(workflow_dir, fname)
+                  try:
+                      with open(path) as f:
+                          yaml.safe_load(f)
+                      print(f'OK: {fname}')
+                  except yaml.YAMLError as e:
+                      errors.append(f'{fname}: {e}')
+                      print(f'ERROR: {fname}: {e}')
+          if errors:
+              sys.exit(1)
+          print(f'All {len(os.listdir(workflow_dir))} workflow files are valid YAML.')
+          " || pip install pyyaml && python3 -c "
+          import yaml, os, sys
+          workflow_dir = '.github/workflows'
+          for fname in os.listdir(workflow_dir):
+              if fname.endswith('.yml') or fname.endswith('.yaml'):
+                  path = os.path.join(workflow_dir, fname)
+                  with open(path) as f:
+                      yaml.safe_load(f)
+                  print(f'OK: {fname}')
+          "

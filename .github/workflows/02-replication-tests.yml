@@ -1,0 +1,211 @@
+name: "2 - Replication Tests"
+
+on:
+  workflow_dispatch:
+    inputs:
+      skip_large_file:
+        description: "Skip 500 MB large file test (faster run)"
+        required: false
+        type: boolean
+        default: false
+  workflow_run:
+    workflows: ["1 - Deploy Infrastructure"]
+    types: [completed]
+    branches: [main]
+  schedule:
+    # Run full replication test suite every day at 06:00 UTC
+    - cron: "0 6 * * *"
+
+env:
+  AWS_REGION: us-east-1
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  # ── Gate: only run if upstream infrastructure job succeeded ─────────────
+  check-upstream:
+    name: Check upstream status
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+    steps:
+      - id: check
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            if [ "${{ github.event.workflow_run.conclusion }}" = "success" ]; then
+              echo "should_run=true" >> $GITHUB_OUTPUT
+            else
+              echo "::warning::Upstream workflow did not succeed; skipping."
+              echo "should_run=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "should_run=true" >> $GITHUB_OUTPUT
+          fi
+
+  # ── Test 1: Upload 20 files + verify replication ─────────────────────────
+  upload-and-verify:
+    name: "Test 1 — Upload 20 Files & Verify Replication"
+    needs: check-upstream
+    if: needs.check-upstream.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # required for OIDC token exchange
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - run: pip install boto3
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::866934333672:role/github-actions-oidc-role
+          role-session-name: GitHubActions-UploadVerify
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Upload 20 files and verify replication
+        run: python upload_and_verify.py
+
+      - name: Upload results artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: replication-results
+          path: replication_results.json
+          retention-days: 30
+
+      - name: Post summary
+        if: always()
+        run: |
+          if [ -f replication_results.json ]; then
+            echo "## Test 1: Upload & Replication Verification" >> $GITHUB_STEP_SUMMARY
+            python3 -c "
+          import json, sys
+          d = json.load(open('replication_results.json'))
+          times = list(d.get('replication_times',{}).values())
+          print('| Metric | Value |')
+          print('|---|---|')
+          print(f'| Files uploaded | {d.get(\"keys_uploaded\",\"N/A\")} |')
+          print(f'| Files replicated | {d.get(\"keys_replicated\",\"N/A\")} |')
+          print(f'| Avg replication lag | {sum(times)/len(times):.1f}s |' if times else '| Avg lag | N/A |')
+          print(f'| Max replication lag | {max(times):.1f}s |' if times else '| Max lag | N/A |')
+          print(f'| 15-min SLA met | {\"PASS\" if d.get(\"sla_met\") else \"FAIL\"} |')
+          " >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # ── Test 2: Delete marker replication ─────────────────────────────────────
+  delete-marker-test:
+    name: "Test 2 — Delete Marker Replication"
+    needs: upload-and-verify
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # required for OIDC token exchange
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - run: pip install boto3
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::866934333672:role/github-actions-oidc-role
+          role-session-name: GitHubActions-DeleteMarker
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Test delete marker replication
+        run: python test_delete_marker.py
+
+      - name: Upload results artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: delete-marker-results
+          path: delete_marker_results.json
+          retention-days: 30
+
+      - name: Post summary
+        if: always()
+        run: |
+          if [ -f delete_marker_results.json ]; then
+            echo "## Test 2: Delete Marker Replication" >> $GITHUB_STEP_SUMMARY
+            python3 -c "
+          import json
+          d = json.load(open('delete_marker_results.json'))
+          print('| Metric | Value |')
+          print('|---|---|')
+          print(f'| Target key | {d.get(\"target_key\",\"N/A\")} |')
+          print(f'| Marker replicated | {\"YES\" if d.get(\"marker_replicated\") else \"NO\"} |')
+          print(f'| Elapsed | {d.get(\"elapsed_seconds\",0):.1f}s |')
+          print(f'| 15-min SLA met | {\"PASS\" if d.get(\"sla_met\") else \"FAIL\"} |')
+          " >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # ── Test 3: Large file lag (optional, can be skipped) ─────────────────────
+  large-file-test:
+    name: "Test 3 — 500 MB Large File Replication Lag"
+    needs: upload-and-verify
+    if: ${{ !inputs.skip_large_file }}
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # required for OIDC token exchange
+      contents: read
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - run: pip install boto3
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::866934333672:role/github-actions-oidc-role
+          role-session-name: GitHubActions-LargeFileTest
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Test 500 MB large file replication lag
+        run: python test_large_file_lag.py
+
+      - name: Upload results artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: large-file-results
+          path: large_file_results.json
+          retention-days: 30
+
+      - name: Post summary
+        if: always()
+        run: |
+          if [ -f large_file_results.json ]; then
+            echo "## Test 3: Large File Replication Lag" >> $GITHUB_STEP_SUMMARY
+            python3 -c "
+          import json
+          d = json.load(open('large_file_results.json'))
+          lag = d.get('replication_lag_s', 0)
+          print('| Metric | Value |')
+          print('|---|---|')
+          print(f'| File size | {d.get(\"file_size_mb\",\"N/A\")} MB |')
+          print(f'| Upload duration | {d.get(\"upload_duration_s\",0):.1f}s |')
+          print(f'| Replication lag | {lag:.1f}s ({lag/60:.1f} min) |')
+          print(f'| Replicated | {\"YES\" if d.get(\"replicated\") else \"NO\"} |')
+          print(f'| 15-min SLA met | {\"PASS\" if d.get(\"sla_met\") else \"FAIL\"} |')
+          " >> $GITHUB_STEP_SUMMARY
+          fi
