@@ -1,0 +1,104 @@
+name: "1 - Deploy Infrastructure"
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type 'deploy' to confirm infrastructure creation"
+        required: true
+        default: ""
+  push:
+    branches:
+      - main
+    paths:
+      - "setup_infrastructure.py"
+      - "config.py"
+
+env:
+  AWS_REGION: us-east-1
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  deploy-infrastructure:
+    name: Create S3 Buckets, IAM Role, CRR Rules & CloudWatch Alarms
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      # ── guard: manual runs require explicit confirmation ──────────────────
+      - name: Validate confirmation input
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "deploy" ]; then
+            echo "::error::Confirmation required. Type 'deploy' in the confirm field."
+            exit 1
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install boto3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Deploy infrastructure
+        run: python setup_infrastructure.py
+
+      - name: Verify primary bucket versioning
+        run: |
+          STATUS=$(aws s3api get-bucket-versioning \
+            --bucket s3-primary-sean-0303 \
+            --query 'Status' --output text)
+          echo "Primary bucket versioning: $STATUS"
+          [ "$STATUS" = "Enabled" ] || (echo "::error::Versioning not enabled!" && exit 1)
+
+      - name: Verify replica bucket versioning
+        run: |
+          STATUS=$(aws s3api get-bucket-versioning \
+            --bucket s3-replica-sean-0303 \
+            --region eu-west-1 \
+            --query 'Status' --output text)
+          echo "Replica bucket versioning: $STATUS"
+          [ "$STATUS" = "Enabled" ] || (echo "::error::Versioning not enabled!" && exit 1)
+
+      - name: Verify CRR configuration
+        run: |
+          aws s3api get-bucket-replication \
+            --bucket s3-primary-sean-0303 \
+            --query 'ReplicationConfiguration.Rules[*].{ID:ID,Status:Status}' \
+            --output table
+
+      - name: Verify CloudWatch alarms
+        run: |
+          aws cloudwatch describe-alarms \
+            --alarm-name-prefix "S3ReplicationLag-sean-0303" \
+            --query 'MetricAlarms[*].{Name:AlarmName,State:StateValue}' \
+            --output table
+
+      - name: Summary
+        run: |
+          echo "## Infrastructure Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Resource | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Primary bucket (us-east-1) | Deployed |" >> $GITHUB_STEP_SUMMARY
+          echo "| Replica bucket (eu-west-1) | Deployed |" >> $GITHUB_STEP_SUMMARY
+          echo "| IAM Replication Role | Deployed |" >> $GITHUB_STEP_SUMMARY
+          echo "| CRR Rules (prefix + tag) | Configured |" >> $GITHUB_STEP_SUMMARY
+          echo "| CloudWatch Alarms | Active |" >> $GITHUB_STEP_SUMMARY

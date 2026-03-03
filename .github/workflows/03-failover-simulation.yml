@@ -1,0 +1,163 @@
+name: "3 - Failover Simulation & RTO Report"
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["2 - Replication Tests"]
+    types: [completed]
+    branches: [main]
+  schedule:
+    # Weekly failover drill — every Sunday at 08:00 UTC
+    - cron: "0 8 * * 0"
+
+env:
+  AWS_REGION: us-east-1
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  check-upstream:
+    name: Check upstream status
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+    steps:
+      - id: check
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            if [ "${{ github.event.workflow_run.conclusion }}" = "success" ]; then
+              echo "should_run=true" >> $GITHUB_OUTPUT
+            else
+              echo "::warning::Upstream workflow did not succeed; skipping."
+              echo "should_run=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "should_run=true" >> $GITHUB_OUTPUT
+          fi
+
+  failover-simulation:
+    name: Simulate Primary Region Failure & Calculate RTO
+    needs: check-upstream
+    if: needs.check-upstream.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - run: pip install boto3
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Run failover simulation
+        run: python simulate_failover.py
+
+      - name: Upload results artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: failover-results
+          path: failover_results.json
+          retention-days: 90
+
+      - name: Post RTO summary
+        if: always()
+        run: |
+          if [ -f failover_results.json ]; then
+            echo "## Failover Simulation & RTO Results" >> $GITHUB_STEP_SUMMARY
+            python3 -c "
+          import json
+          d = json.load(open('failover_results.json'))
+          rto = d.get('rto_seconds')
+          tested = d.get('objects_tested', 0)
+          readable = d.get('objects_readable', 0)
+          print('| Metric | Value |')
+          print('|---|---|')
+          print(f'| Failure declared (UTC) | {d.get(\"failure_time_utc\",\"N/A\")} |')
+          print(f'| RTO (time to first read) | {rto:.2f}s |' if rto else '| RTO | N/A |')
+          print(f'| Objects readable | {readable}/{tested} |')
+          print(f'| Avg read latency | {d.get(\"avg_read_latency_ms\",0):.0f} ms |')
+          print(f'| P95 read latency | {d.get(\"p95_read_latency_ms\",0):.0f} ms |')
+          all_ok = readable == tested and tested > 0
+          print(f'| Failover outcome | {\"ALL OBJECTS READABLE\" if all_ok else \"SOME OBJECTS UNAVAILABLE\"} |')
+          " >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Fail if objects not readable
+        run: |
+          python3 -c "
+          import json, sys
+          d = json.load(open('failover_results.json'))
+          if d.get('objects_readable',0) != d.get('objects_tested',1):
+              print('FAIL: Not all objects readable from replica during failover!')
+              sys.exit(1)
+          print('PASS: All objects readable from replica.')
+          "
+
+  generate-full-report:
+    name: Generate Full Lab Report
+    needs: failover-simulation
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - run: pip install boto3
+
+      # Download all result artifacts into the working directory
+      - uses: actions/download-artifact@v4
+        with:
+          name: replication-results
+        continue-on-error: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: delete-marker-results
+        continue-on-error: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: large-file-results
+        continue-on-error: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: failover-results
+        continue-on-error: true
+
+      - name: Generate report
+        run: python generate_report.py
+
+      - name: Upload lab report
+        uses: actions/upload-artifact@v4
+        with:
+          name: lab-report-${{ github.run_number }}
+          path: lab_report.txt
+          retention-days: 90
+
+      - name: Print report to logs
+        run: cat lab_report.txt
+
+      - name: Post final summary
+        run: |
+          echo "## Lab Report Generated" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat lab_report.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
