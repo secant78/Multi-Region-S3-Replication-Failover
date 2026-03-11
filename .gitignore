@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+.env
+
+# Test result JSON files (generated at runtime — not stored in repo)
+replication_results.json
+delete_marker_results.json
+large_file_results.json
+failover_results.json
+
+# Generated report (produced by CI, uploaded as artifact)
+lab_report.txt
+
+# AWS credentials — NEVER commit these
+.aws/
+credentials
+*.pem
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Claude Code local settings
+.claude/
